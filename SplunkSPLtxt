@@ -1,0 +1,152 @@
+인트라넷 1
+
+
+상황# 1. 비정상 통신 탐지(DDoS 및 이상 연결 탐지)
+2 표준 편차 이외의 횟수 식별
+index=fw action="*allow*" NOT src_ip IN ("서버 ip")
+src_ip IN ("마스킹") dest_ip IN ("서버 IP")
+| bin _time span=1h
+| eventstats max(_time) as maxtime 
+| stats count by _time src_ip dest_ip dest_port
+| stats count as num_data_samples
+   max(eval(if(_time>=relative_time(maxtime, "-1d@d"), count, null))) as cntcon
+   avg(eval(if(_time>=relative_time(maxtime, "-1d@d"), count, null))) as avgcon
+   stdev(eval(if(_time>=relative_time(maxtime, "-1d@d"), count, null))) as stdevcon
+   by src_ip dest_ip dest_port
+| eval upper = avg + stdev * 2
+| eval is_upper = if(cntcon > upper AND num_data_samples >= 5, 1, 0)
+| table src_ip, dest_ip, dest_port, cntcon, avgcon, stdevcon, is_upper
+| where is_upper=1 AND cntcon > 2000
+
+
+상황 #5. 포트 스캐닝 탐지(4h/5m)
+내부 대역에서 스캐닝 시도 탐지
+index=fw action="*allow*" NOT src_ip IN ("서버IP")
+| eval time=strftime(_time, "%F %T") 
+| stats min(time) as Ftime, count(dest_port) as dport_count, values(dest_ip) as dest_ip, values(dest_port) as dest_port by src_ip
+| table Ftime, src_ip, dest_port, dport_count
+| sort -dport_count
+| rename Ftime as "일시", src_ip as "출발지 IP", dest_port as "목적지 포트", dport_count as "호출 시도 횟수"
+
+
+상황#4. c4i 데이터 변조 대응(계정탈취)
+- 탐지 결과
+index=secos sourcetype="마스킹", LOGEVENT="login"
+| timechart count span=1d
+| appendpipe
+    [| stats count 
+    | where count=0
+    | table count]
+- 관리자 계정 접속 기록
+index=secos sourcetype="마스킹", LOGEVENT="login"
+| rex field=_raw "LOGRESULT=\"(?<LOGRESULT>.*?)\""
+| eval time=strftime(_time, "%T") 
+| appendpipe
+    [| stats count 
+    | where count=0]
+| fillnull value="-" time, host, IP, LOGRESULT
+| table time, host, IP, LOGRESULT
+| replace "success" with "로그인 성공", "fail" with "로그인 실패"
+| rename time as "일시", host as "서버IP", IP as "탐지IP", LOGRESULT as "로그인결과"
+
+
+
+상황#5. 비인가 장비 연결을 통한 공격
+- 탐지 결과
+index=nac sourcetype="마스킹", msg="*비관리*"
+| eval host_class = mvindex(split(host,"."),0) 
+| eval ip_class = mvindex(split(ip,"."),0) 
+| where host_class != ip_class 
+| eval time=strftime(_time, "%F %T")
+| eval temp=mvjoin(mvindex(split(sourcetype,":"),0,2),":") 
+| lookup sourcetype_as_budae.csv sourcetype as temp OUTPUTNEW C
+
+- 신규 연결 노드 식별
+index=nac sourcetype="마스킹", msg="*비관리*" 
+| eval host_class = mvindex(split(host,"."),0) 
+| eval ip_class = mvindex(split(ip,"."),0) 
+| where host_class != ip_class 
+| eval time=strftime(_time, "%F %T") 
+| eval temp=mvjoin(mvindex(split(sourcetype,":"),0,2),":") 
+| lookup sourcetype_as_budae.csv sourcetype as temp OUTPUTNEW C  
+| sort -time
+| fillnull value="-" time, C, IP, MAC 
+| table time, C, IP, MAC
+| rename time as "일시", C as "부대", IP as "탐지IP"
+
+상황#3. 자료 유출 식별
+- 내부 대역에서 외부 대역으로 통신하는 노드 식별
+index IN( fw, ips) dest_port < 포트번호 desp_ip != 마스킹
+| eval ipSplit = split(src_ip, ".") , ipA = mvindex(ipSplit, 0), ipB = mvindex(ipSplit, 1), ipC = mvindex(ipSplit, 2), ipD = mvindex(ipSplit, 3)
+| eval sip_cidr = ipA+ipB+"0.0/16"
+| eval time=strftime(_time, "%F %T") 
+| stats dc(src_port) as sport_count, dc(dest_ip) as dip_count, dc(dest_port) as dport_count, values(protocol) as plist, count by src_ip
+| nomv plist
+| table time, src_ip, src_port, dest_ip, dest_port
+| sort -sport_to_dip_ratio
+
+상황 #6. NAC 인스턴스 메시지 취약점 공격
+NAC 센서 및 정책 서버 이외 포트번호 포트 통신
+index=fw src_port IN (포트번호) NOT src_ip IN (서버IP) NOT dest_ip IN (서버IP)
+| eval time = strftime(_time, "%F %T")
+| table time src_ip src_port dest_ip dest_port
+| rename time as "시간" src_ip as "출발IP" src_port as "출발포트" dest_ip as "도착IP" dest_port as "도착포트"
+
+-----------------------------------------------------------------------------------------------------------------------------------------------------
+인트라넷 2
+
+
+#1. DDoS 탐지 (통신량 급증)
+index="roka_utm" sourcetype IN ("*_allow", "*_deny") dest_ip IN ([마스킹]) src_ip IN ([마스킹])
+| bin _time span=1h
+| stats count by _time src_ip dest_ip dest_port
+| eventstats max(_time) as maxtime
+| stats count AS num_data_samples
+	max(eval(if(_time>=relative_time(maxtime, "-1d@d"), 'count', null))) as "count"
+	avg(eval(if(_time>=relative_time(maxtime, "-1d@d"), 'count', null))) as avg
+	stdev(eval(if(_time>=relative_time(maxtime, "-1d@d"), 'count', null))) as stdev
+	by src_ip, dest_ip, dest_port
+| eval upper=avg+stdev*2
+| eval is_upper=if('count' > upper AND num_data_samples >= 5, 1, 0)
+| table src_ip, dest_ip, dest_port, "count", avg, stdev, is_upper
+| where is_upper = 1 AND count > 2000
+
+#2. 비정상 통신(일정 시간 내 대용량 트래픽 전송)
+(index="*_fw" OR index="*_utm") sourcetype="*_allow" src_ip IN ([마스킹]) 
+| where sent_data != 0 AND sent_data != ""
+| bin _time span=1m aligntime=@m
+| stats sum(sent_data) AS sent_data_sum by _time, src_ip, dest_ip
+| table _time, src_ip, dest_ip, sent_data_sum
+| eval data_gb_sum=tostring(round(sent_data_sum/1024/1024/1024, 2))." GB"
+| where sent_data_sum > 1024*1024*1024
+| eval time = strftime(_time, "%F %T") 
+| table time, src_ip, dest_ip, data_gb_sum
+| rename time as "시간"
+| rename scr_ip as "출발지"
+| rename dest_ip as "도착지"
+| rename data_gb_sum as "전송량(GB)"
+
+#3. 비정상 통신(교환기 call 서버 취약점)
+index="roka_utm" dest_ip IN ([마스킹]) dest_port IN ([마스킹]) | eval time=strftime(_time, "%T")| table time src_ip src_port dest_ip dest_port
+
+#4. 장기 지속 자료 탈취
+index=roka_utm src_ip IN ([마스킹]) dest_ip=[마스킹] OR dest_ip=[마스킹] 
+| timechart span=10m count by src_ip | eval _time=strftime(_time, "%m-%d %H:%M")
+| rename _time as "탐지시간"
+
+#5. 비정상 통신(nac 인스턴스)
+index="roka_utm"  src_port IN ([마스킹]) dest_port IN ([마스킹]) NOT src_ip IN [마스킹]) NOT dest_ip IN ([마스킹])| eval time = strftime(_time, "%F %T") | table time src_ip src_port dest_ip dest_port
+
+#6. 포트스캐닝 탐지
+index="[마스킹]" unit="[마스킹]*" sourcetype="ahn*"| eval time = strftime(_time, "%F %T") | stats dc(dest_ip) as numDestIp dc(dest_port) as numDestPort by src_ip src_port| where numDestIp > 50 OR numDestPort > 50| rename numDestIp as "IP스캔 횟수" numDestPort as "포트 스캔 횟수" src_ip as "공격지 IP" src_port as "공격지 포트" dest_ip as "목표 IP" dest_port as "목표 포트"
+
+#7. 비정상 통신(의심IP로의 통신)
+index="roka_utm" sourcetype="ahn_*" unit="[마스킹]"
+src_ip IN ([마스킹])
+NOT dest_ip IN ([마스킹])
+| eval flag=case(tcp_flag!="", tcp_flag, 1=1, "-")
+| eval conn=case(flag=="S sa A / %", "연결 성립!!", flag!="S sa A / *", "추가 확인 필요")
+| eval protocol = case(porotocol == 17, "UDP", procotocol==6, "TCP", protocol==1, "ICMP", protocol == 2, "IGMP", 1=1, "기타")
+| eval time=strftime(_time, "%Y-%m-%d %H:%M")
+| table time src_ip dest_ip protocol flag conn
+| rename time as "시간", src_ip as "출발IP", dest_ip as "도착IP" protocol as "프로토콜", conn as "연결 여부"
